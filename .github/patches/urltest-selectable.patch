@@ -1,0 +1,223 @@
+diff --git a/daemon/started_service.go b/daemon/started_service.go
+index 846625a..1301338 100644
+--- a/daemon/started_service.go
++++ b/daemon/started_service.go
+@@ -491,6 +491,9 @@ func (s *StartedService) readGroups() *Groups {
+ 		g.Tag = iGroup.Tag()
+ 		g.Type = iGroup.Type()
+ 		_, g.Selectable = iGroup.(*group.Selector)
++		if !g.Selectable {
++			_, g.Selectable = iGroup.(group.SelectableURLTest)
++		}
+ 		g.Selected = iGroup.Now()
+ 		if boxService.cacheFile != nil {
+ 			if isExpand, loaded := boxService.cacheFile.LoadGroupExpand(g.Tag); loaded {
+@@ -677,12 +680,12 @@ func (s *StartedService) SelectOutbound(ctx context.Context, request *SelectOutb
+ 	if !isLoaded {
+ 		return nil, status.Error(codes.NotFound, "selector not found: "+request.GroupTag)
+ 	}
+-	selector, isSelector := outboundGroup.(*group.Selector)
+-	if !isSelector {
+-		return nil, status.Error(codes.InvalidArgument, "outbound is not a selector: "+request.GroupTag)
++	selectable, isSelectable := outboundGroup.(interface{ SelectOutbound(string) bool })
++	if !isSelectable {
++		return nil, status.Error(codes.InvalidArgument, "outbound is not selectable: "+request.GroupTag)
+ 	}
+-	if !selector.SelectOutbound(request.OutboundTag) {
+-		return nil, status.Error(codes.NotFound, "outbound not found in selector: "+request.OutboundTag)
++	if !selectable.SelectOutbound(request.OutboundTag) {
++		return nil, status.Error(codes.NotFound, "outbound not found in group: "+request.OutboundTag)
+ 	}
+ 	return &emptypb.Empty{}, nil
+ }
+diff --git a/experimental/clashapi/proxies.go b/experimental/clashapi/proxies.go
+index ef88ff3..2210481 100644
+--- a/experimental/clashapi/proxies.go
++++ b/experimental/clashapi/proxies.go
+@@ -11,7 +11,6 @@ import (
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/common/urltest"
+ 	C "github.com/sagernet/sing-box/constant"
+-	"github.com/sagernet/sing-box/protocol/group"
+ 	"github.com/sagernet/sing/common"
+ 	F "github.com/sagernet/sing/common/format"
+ 	"github.com/sagernet/sing/common/json/badjson"
+@@ -168,16 +167,16 @@ func updateProxy(w http.ResponseWriter, r *http.Request) {
+ 	}
+ 
+ 	proxy := r.Context().Value(CtxKeyProxy).(adapter.Outbound)
+-	selector, ok := proxy.(*group.Selector)
++	selectable, ok := proxy.(interface{ SelectOutbound(string) bool })
+ 	if !ok {
+ 		render.Status(r, http.StatusBadRequest)
+-		render.JSON(w, r, newError("Must be a Selector"))
++		render.JSON(w, r, newError("Must be a selectable group"))
+ 		return
+ 	}
+ 
+-	if !selector.SelectOutbound(req.Name) {
++	if !selectable.SelectOutbound(req.Name) {
+ 		render.Status(r, http.StatusBadRequest)
+-		render.JSON(w, r, newError("Selector update error: not found"))
++		render.JSON(w, r, newError("Group update error: not found"))
+ 		return
+ 	}
+ 
+diff --git a/protocol/group/urltest.go b/protocol/group/urltest.go
+index d97235b..2b99baa 100644
+--- a/protocol/group/urltest.go
++++ b/protocol/group/urltest.go
+@@ -33,6 +33,10 @@ var (
+ 	_ adapter.InterfaceUpdateListener = (*URLTest)(nil)
+ )
+ 
++type SelectableURLTest interface {
++	SelectOutbound(tag string) bool
++}
++
+ type URLTest struct {
+ 	outbound.Adapter
+ 	ctx                          context.Context
+@@ -77,7 +81,7 @@ func (s *URLTest) Start() error {
+ 		}
+ 		outbounds = append(outbounds, detour)
+ 	}
+-	group, err := NewURLTestGroup(s.ctx, s.outbound, s.logger, outbounds, s.link, s.interval, s.tolerance, s.idleTimeout, s.interruptExternalConnections)
++	group, err := NewURLTestGroup(s.ctx, s.outbound, s.logger, s.Tag(), outbounds, s.link, s.interval, s.tolerance, s.idleTimeout, s.interruptExternalConnections)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -97,6 +101,9 @@ func (s *URLTest) Close() error {
+ }
+ 
+ func (s *URLTest) Now() string {
++	if s.group.manualSelectedTag != "" {
++		return s.group.manualSelectedTag
++	}
+ 	if s.group.selectedOutboundTCP != nil {
+ 		return s.group.selectedOutboundTCP.Tag()
+ 	} else if s.group.selectedOutboundUDP != nil {
+@@ -113,6 +120,10 @@ func (s *URLTest) URLTest(ctx context.Context) (map[string]uint16, error) {
+ 	return s.group.URLTest(ctx)
+ }
+ 
++func (s *URLTest) SelectOutbound(tag string) bool {
++	return s.group.SelectOutbound(tag)
++}
++
+ func (s *URLTest) CheckOutbounds() {
+ 	s.group.CheckOutbounds(true)
+ }
+@@ -188,6 +199,7 @@ type URLTestGroup struct {
+ 	pause                        pause.Manager
+ 	pauseCallback                *list.Element[pause.Callback]
+ 	logger                       log.Logger
++	groupTag                     string
+ 	outbounds                    []adapter.Outbound
+ 	link                         string
+ 	interval                     time.Duration
+@@ -197,6 +209,7 @@ type URLTestGroup struct {
+ 	checking                     atomic.Bool
+ 	selectedOutboundTCP          adapter.Outbound
+ 	selectedOutboundUDP          adapter.Outbound
++	manualSelectedTag            string
+ 	interruptGroup               *interrupt.Group
+ 	interruptExternalConnections bool
+ 	access                       sync.Mutex
+@@ -206,7 +219,7 @@ type URLTestGroup struct {
+ 	lastActive                   common.TypedValue[time.Time]
+ }
+ 
+-func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManager, logger log.Logger, outbounds []adapter.Outbound, link string, interval time.Duration, tolerance uint16, idleTimeout time.Duration, interruptExternalConnections bool) (*URLTestGroup, error) {
++func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManager, logger log.Logger, groupTag string, outbounds []adapter.Outbound, link string, interval time.Duration, tolerance uint16, idleTimeout time.Duration, interruptExternalConnections bool) (*URLTestGroup, error) {
+ 	if interval == 0 {
+ 		interval = C.DefaultURLTestInterval
+ 	}
+@@ -227,6 +240,7 @@ func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManage
+ 		ctx:                          ctx,
+ 		outbound:                     outboundManager,
+ 		logger:                       logger,
++		groupTag:                     groupTag,
+ 		outbounds:                    outbounds,
+ 		link:                         link,
+ 		interval:                     interval,
+@@ -245,6 +259,26 @@ func (g *URLTestGroup) PostStart() {
+ 	defer g.access.Unlock()
+ 	g.started = true
+ 	g.lastActive.Store(time.Now())
++	if g.groupTag != "" {
++		cacheFile := service.FromContext[adapter.CacheFile](g.ctx)
++		if cacheFile != nil {
++			selected := cacheFile.LoadSelected(g.groupTag)
++			if selected != "" {
++				for _, detour := range g.outbounds {
++					if detour.Tag() == selected || RealTag(detour) == selected {
++						if common.Contains(detour.Network(), N.NetworkTCP) {
++							g.selectedOutboundTCP = detour
++						}
++						if common.Contains(detour.Network(), N.NetworkUDP) {
++							g.selectedOutboundUDP = detour
++						}
++						g.manualSelectedTag = selected
++						break
++					}
++				}
++			}
++		}
++	}
+ 	go g.CheckOutbounds(false)
+ }
+ 
+@@ -322,6 +356,52 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
+ 	return minOutbound, true
+ }
+ 
++func (g *URLTestGroup) SelectOutbound(tag string) bool {
++	g.access.Lock()
++	defer g.access.Unlock()
++	var selected adapter.Outbound
++	for _, detour := range g.outbounds {
++		if detour.Tag() == tag || RealTag(detour) == tag {
++			selected = detour
++			break
++		}
++	}
++	if selected == nil {
++		return false
++	}
++	if !common.Contains(selected.Network(), N.NetworkTCP) && !common.Contains(selected.Network(), N.NetworkUDP) {
++		return false
++	}
++	updated := false
++	if common.Contains(selected.Network(), N.NetworkTCP) && g.selectedOutboundTCP != selected {
++		g.selectedOutboundTCP = selected
++		updated = true
++	}
++	if common.Contains(selected.Network(), N.NetworkUDP) && g.selectedOutboundUDP != selected {
++		g.selectedOutboundUDP = selected
++		updated = true
++	}
++	if updated {
++		selectedTag := selected.Tag()
++		if selectedTag == "" {
++			selectedTag = tag
++		}
++		g.manualSelectedTag = selectedTag
++		if g.groupTag != "" {
++			if cacheFile := service.FromContext[adapter.CacheFile](g.ctx); cacheFile != nil {
++				if err := cacheFile.StoreSelected(g.groupTag, selectedTag); err != nil {
++					g.logger.Error("store selected: ", err)
++				}
++			}
++		}
++		g.interruptGroup.Interrupt(g.interruptExternalConnections)
++		if g.history != nil {
++			g.history.NotifyUpdated()
++		}
++	}
++	return true
++}
++
+ func (g *URLTestGroup) loopCheck(ticker *time.Ticker, closeChan <-chan struct{}) {
+ 	if time.Since(g.lastActive.Load()) > g.interval {
+ 		g.lastActive.Store(time.Now())

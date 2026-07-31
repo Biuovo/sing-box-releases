@@ -1,11 +1,12 @@
-name: Build sing-box stable (Android and CLI)
+name: Build sing-box latest musl
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version tag or temporary tag when building from commit hash (e.g. 1.13.0-rc.4)'
-        required: true
+        description: 'Version tag without v; leave empty to build latest upstream release/tag (e.g. 1.14.0-beta.3)'
+        required: false
+        default: ''
       commit_hash:
         description: 'Optional commit hash to build from (overrides version tag)'
         required: false
@@ -19,10 +20,10 @@ on:
         description: 'Build Android'
         required: false
         type: boolean
-        default: true
+        default: false
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.version }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.version || 'latest' }}
   cancel-in-progress: true
 
 env:
@@ -34,29 +35,54 @@ jobs:
     name: Resolve sing-box source
     runs-on: ubuntu-latest
     outputs:
+      source_ref: ${{ steps.source.outputs.source_ref }}
       source_sha: ${{ steps.source.outputs.source_sha }}
+      version: ${{ steps.source.outputs.version }}
     steps:
-      - name: Checkout sing-box
-        uses: actions/checkout@v6
-        with:
-          repository: reF1nd/sing-box
-          ref: ${{ inputs.commit_hash != '' && inputs.commit_hash || format('v{0}', inputs.version) }}
-          path: sing-box
-          fetch-depth: 1
-
-      - name: Resolve source commit
+      - name: Resolve latest upstream source
         id: source
+        shell: bash
         run: |
           set -euo pipefail
-          if [[ ! "$INPUT_VERSION" =~ ^[0-9A-Za-z][0-9A-Za-z.+-]*$ ]]; then
-            echo "invalid version: $INPUT_VERSION" >&2
+          input_version="$INPUT_VERSION"
+          input_commit="$INPUT_COMMIT"
+          if [[ -n "$input_version" && ! "$input_version" =~ ^[0-9A-Za-z][0-9A-Za-z.+-]*$ ]]; then
+            echo "invalid version: $input_version" >&2
             exit 1
           fi
-          source_sha=$(git -C sing-box rev-parse HEAD)
+          if [[ -n "$input_commit" ]]; then
+            source_ref="$input_commit"
+            source_sha="$input_commit"
+            version="${input_version:-custom-${input_commit:0:12}}"
+          else
+            if [[ -z "$input_version" ]]; then
+              release_tag=$(gh api repos/reF1nd/sing-box-releases/releases --jq '.[0].tag_name' 2>/dev/null || true)
+              if [[ -z "$release_tag" || "$release_tag" == "null" ]]; then
+                release_tag=$(gh release list --repo reF1nd/sing-box-releases --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null || true)
+              fi
+              if [[ -z "$release_tag" || "$release_tag" == "null" ]]; then
+                echo "unable to resolve latest upstream release" >&2
+                exit 1
+              fi
+              input_version="${release_tag#v}"
+              input_version="${input_version%-reF1nd}"
+            fi
+            version="$input_version"
+            source_ref="v${version}"
+            source_sha=$(git ls-remote https://github.com/reF1nd/sing-box.git "$source_ref" | awk '{print $1}' | head -n1)
+          fi
+          if [[ -z "$source_sha" ]]; then
+            echo "unable to resolve reF1nd/sing-box ref: $source_ref" >&2
+            exit 1
+          fi
+          echo "source_ref=${source_ref}" >> "$GITHUB_OUTPUT"
           echo "source_sha=${source_sha}" >> "$GITHUB_OUTPUT"
-          echo "Resolved sing-box source: ${source_sha}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Resolved sing-box source: ${source_ref} ${source_sha}"
         env:
+          GH_TOKEN: ${{ github.token }}
           INPUT_VERSION: ${{ inputs.version }}
+          INPUT_COMMIT: ${{ inputs.commit_hash }}
 
   build_cli:
     if: ${{ github.event.inputs.build_cli == 'true' }}
@@ -75,50 +101,8 @@ jobs:
             goarch: arm64
             goamd64: ''
             binary: sing-box
-            variant: purego
-            artifact_name: binary-linux-arm64-purego
-            naive: true
-          - platform: linux
-            arch: arm64
-            os: ubuntu-26.04
-            goos: linux
-            goarch: arm64
-            goamd64: ''
-            binary: sing-box
-            variant: glibc
-            artifact_name: binary-linux-arm64-glibc
-            cgo: '1'
-            naive: true
-          - platform: linux
-            arch: arm64
-            os: ubuntu-26.04
-            goos: linux
-            goarch: arm64
-            goamd64: ''
-            binary: sing-box
             variant: musl
             artifact_name: binary-linux-arm64-musl
-            cgo: '1'
-            naive: true
-          - platform: linux
-            arch: amd64
-            os: ubuntu-26.04
-            goos: linux
-            goarch: amd64
-            goamd64: v1
-            binary: sing-box
-            variant: purego
-            artifact_name: binary-linux-amd64-purego
-            naive: true
-          - platform: linux
-            arch: amd64
-            os: ubuntu-26.04
-            goos: linux
-            goarch: amd64
-            goamd64: v1
-            binary: sing-box
-            variant: glibc
-            artifact_name: binary-linux-amd64-glibc
             cgo: '1'
             naive: true
           - platform: linux
@@ -139,160 +123,14 @@ jobs:
             goarch: amd64
             goamd64: v3
             binary: sing-box
-            variant: purego
-            artifact_name: binary-linux-amd64v3-purego
-            naive: true
-          - platform: linux
-            arch: amd64v3
-            os: ubuntu-26.04
-            goos: linux
-            goarch: amd64
-            goamd64: v3
-            binary: sing-box
-            variant: glibc
-            artifact_name: binary-linux-amd64v3-glibc
-            cgo: '1'
-            naive: true
-          - platform: linux
-            arch: amd64v3
-            os: ubuntu-26.04
-            goos: linux
-            goarch: amd64
-            goamd64: v3
-            binary: sing-box
             variant: musl
             artifact_name: binary-linux-amd64v3-musl
             cgo: '1'
             naive: true
-          - platform: windows
-            arch: arm64
-            os: windows-latest
-            goos: windows
-            goarch: arm64
-            goamd64: ''
-            binary: sing-box.exe
-            variant: purego
-            artifact_name: binary-windows-arm64
-            naive: true
-          - platform: windows
-            arch: amd64
-            os: windows-latest
-            goos: windows
-            goarch: amd64
-            goamd64: v1
-            binary: sing-box.exe
-            variant: purego
-            artifact_name: binary-windows-amd64
-            naive: true
-          - platform: windows
-            arch: amd64v3
-            os: windows-latest
-            goos: windows
-            goarch: amd64
-            goamd64: v3
-            binary: sing-box.exe
-            variant: purego
-            artifact_name: binary-windows-amd64v3
-            naive: true
-          - platform: darwin
-            arch: arm64
-            os: macos-latest
-            goos: darwin
-            goarch: arm64
-            goamd64: ''
-            binary: sing-box
-            artifact_name: binary-darwin-arm64
-            cgo: '1'
-            naive: true
-          - platform: darwin
-            arch: amd64
-            os: macos-latest
-            goos: darwin
-            goarch: amd64
-            goamd64: v1
-            binary: sing-box
-            artifact_name: binary-darwin-amd64
-            cgo: '1'
-            naive: true
-          - platform: darwin
-            arch: amd64v3
-            os: macos-latest
-            goos: darwin
-            goarch: amd64
-            goamd64: v3
-            binary: sing-box
-            artifact_name: binary-darwin-amd64v3
-            cgo: '1'
-            naive: true
-          - platform: darwin
-            arch: amd64
-            os: macos-latest
-            goos: darwin
-            goarch: amd64
-            goamd64: v1
-            binary: sing-box
-            artifact_name: binary-darwin-amd64-legacy-macos-10.13
-            legacy_macos: true
-            legacy_name: macos-10.13
-            macos_deployment_target: '10.13'
-            cgo: '1'
-            naive: false
-          - platform: android
-            arch: 386
-            os: ubuntu-26.04
-            goos: android
-            goarch: 386
-            goamd64: ''
-            binary: sing-box
-            artifact_name: binary-android-386
-            cgo: '1'
-            cc_triple: 'i686-linux-android23'
-            naive: true
-          - platform: android
-            arch: amd64
-            os: ubuntu-26.04
-            goos: android
-            goarch: amd64
-            goamd64: v1
-            binary: sing-box
-            artifact_name: binary-android-amd64
-            cgo: '1'
-            cc_triple: 'x86_64-linux-android23'
-            naive: true
-          - platform: android
-            arch: amd64v3
-            os: ubuntu-26.04
-            goos: android
-            goarch: amd64
-            goamd64: v3
-            binary: sing-box
-            artifact_name: binary-android-amd64v3
-            cgo: '1'
-            cc_triple: 'x86_64-linux-android23'
-            naive: true
-          - platform: android
-            arch: arm
-            os: ubuntu-26.04
-            goos: android
-            goarch: arm
-            goamd64: ''
-            binary: sing-box
-            artifact_name: binary-android-arm
-            cgo: '1'
-            cc_triple: 'armv7a-linux-androideabi23'
-            naive: true
-          - platform: android
-            arch: arm64
-            os: ubuntu-26.04
-            goos: android
-            goarch: arm64
-            goamd64: ''
-            binary: sing-box
-            artifact_name: binary-android-arm64
-            cgo: '1'
-            cc_triple: 'aarch64-linux-android23'
-            naive: true
     steps:
+      - name: Checkout build config
+        uses: actions/checkout@v6
+
       - name: Setup Go for Darwin
         if: matrix.platform == 'darwin' && matrix.legacy_macos != true
         uses: actions/setup-go@v6
@@ -315,13 +153,14 @@ jobs:
           path: sing-box
           fetch-depth: 1
 
-      - name: Set build tag
+      - name: Apply local patches and set build tag
         shell: bash
         run: |
           set -xeuo pipefail
           cd sing-box
-          TAG="v${{ github.event.inputs.version }}"
-          git tag -f "${TAG}" "${{ needs.resolve_source.outputs.source_sha }}"
+          git apply "$GITHUB_WORKSPACE/.github/patches/urltest-selectable.patch"
+          TAG="v${{ needs.resolve_source.outputs.version }}"
+          git tag -f "${TAG}" HEAD
 
       - name: Cache Go for macOS 10.13
         if: matrix.legacy_macos == true
@@ -476,7 +315,7 @@ jobs:
           fi
           go build -v -trimpath -o "dist/${{ matrix.binary }}" \
             -tags "${{ steps.env.outputs.tags }}" \
-            -ldflags "-X github.com/sagernet/sing-box/constant.Version=${{ github.event.inputs.version }} ${LDFLAGS_SHARED} -s -w -buildid=" \
+            -ldflags "-X github.com/sagernet/sing-box/constant.Version=${{ needs.resolve_source.outputs.version }} ${LDFLAGS_SHARED} -s -w -buildid=" \
             ./cmd/sing-box
         env:
           LDFLAGS_SHARED: ${{ steps.env.outputs.ldflags }}
@@ -505,7 +344,7 @@ jobs:
         shell: bash
         run: |
           cd sing-box/dist
-          DIR_NAME="sing-box-${{ github.event.inputs.version }}-linux-${{ matrix.arch }}${{ steps.env.outputs.archive_suffix }}"
+          DIR_NAME="sing-box-${{ needs.resolve_source.outputs.version }}-linux-${{ matrix.arch }}${{ steps.env.outputs.archive_suffix }}"
           mkdir -p "$DIR_NAME"
           cp ../LICENSE "$DIR_NAME/"
           cp sing-box "$DIR_NAME/"
@@ -521,7 +360,7 @@ jobs:
         shell: pwsh
         run: |
           cd sing-box/dist
-          $DIR_NAME = "sing-box-${{ github.event.inputs.version }}-windows-${{ matrix.arch }}"
+          $DIR_NAME = "sing-box-${{ needs.resolve_source.outputs.version }}-windows-${{ matrix.arch }}"
           mkdir "$DIR_NAME"
           Copy-Item ../LICENSE "$DIR_NAME/"
           Copy-Item sing-box.exe "$DIR_NAME/"
@@ -537,7 +376,7 @@ jobs:
         if: matrix.platform == 'darwin'
         run: |
           cd sing-box/dist
-          DIR_NAME="sing-box-${{ github.event.inputs.version }}-darwin-${{ matrix.arch }}"
+          DIR_NAME="sing-box-${{ needs.resolve_source.outputs.version }}-darwin-${{ matrix.arch }}"
           if [[ -n "${{ matrix.legacy_name }}" ]]; then
             DIR_NAME="${DIR_NAME}-legacy-${{ matrix.legacy_name }}"
           fi
@@ -551,7 +390,7 @@ jobs:
         if: matrix.platform == 'android'
         run: |
           cd sing-box/dist
-          DIR_NAME="sing-box-${{ github.event.inputs.version }}-android-${{ matrix.arch }}"
+          DIR_NAME="sing-box-${{ needs.resolve_source.outputs.version }}-android-${{ matrix.arch }}"
           mkdir -p "$DIR_NAME"
           cp ../LICENSE "$DIR_NAME/"
           cp sing-box "$DIR_NAME/"
@@ -583,7 +422,7 @@ jobs:
           fetch-depth: 1
 
       - name: Set build tag
-        run: git -C sing-box tag -f "v${{ github.event.inputs.version }}" "${{ needs.resolve_source.outputs.source_sha }}"
+        run: git -C sing-box tag -f "v${{ needs.resolve_source.outputs.version }}" "${{ needs.resolve_source.outputs.source_sha }}"
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -654,7 +493,7 @@ jobs:
           fetch-depth: 1
 
       - name: Set build tag
-        run: git -C sing-box tag -f "v${{ github.event.inputs.version }}" "${{ needs.resolve_source.outputs.source_sha }}"
+        run: git -C sing-box tag -f "v${{ needs.resolve_source.outputs.version }}" "${{ needs.resolve_source.outputs.source_sha }}"
 
       - name: Checkout sing-box-for-android
         uses: actions/checkout@v6
@@ -708,7 +547,7 @@ jobs:
         run: |
           set -euo pipefail
           file="sing-box-for-android/version.properties"
-          sed -i "s/^VERSION_NAME=.*/VERSION_NAME=${{ github.event.inputs.version }}/" "$file"
+          sed -i "s/^VERSION_NAME=.*/VERSION_NAME=${{ needs.resolve_source.outputs.version }}/" "$file"
           grep '^VERSION_NAME=' "$file"
 
       - name: Read version code from source
@@ -757,7 +596,7 @@ jobs:
           cp sing-box-for-android/${{ matrix.output }} dist
           if [[ "${{ matrix.variant }}" == "other" ]]; then
             printf '{\n    "version_code": %s,\n    "version_name": "%s"\n}\n' \
-              "$VERSION_CODE" "${{ github.event.inputs.version }}" > dist/SFA-version-metadata.json
+              "$VERSION_CODE" "${{ needs.resolve_source.outputs.version }}" > dist/SFA-version-metadata.json
             cat dist/SFA-version-metadata.json
           fi
 
@@ -816,7 +655,7 @@ jobs:
             --arg repository "${{ github.repository }}" \
             --arg head_branch "${{ github.ref_name }}" \
             --arg head_sha "${{ github.sha }}" \
-            --arg version "${{ inputs.version }}" \
+            --arg version "${{ needs.resolve_source.outputs.version }}" \
             --arg source_sha "${{ needs.resolve_source.outputs.source_sha }}" \
             --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --argjson run_id "${{ github.run_id }}" \
