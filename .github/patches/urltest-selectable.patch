@@ -64,10 +64,18 @@ index ef88ff3..54e5872 100644
  		render.JSON(w, r, newError("Selector update error: not found"))
  		return
 diff --git a/protocol/group/urltest.go b/protocol/group/urltest.go
-index 77125cd..0ba4c17 100644
+index 77125cd..6593170 100644
 --- a/protocol/group/urltest.go
 +++ b/protocol/group/urltest.go
-@@ -165,6 +165,17 @@ func (s *URLTest) All() []string {
+@@ -138,6 +138,7 @@ func (s *URLTest) Start() error {
+ 		return err
+ 	}
+ 	s.group = group
++	s.group.LoadManualSelected(s.Tag())
+ 	return nil
+ }
+ 
+@@ -165,6 +166,17 @@ func (s *URLTest) All() []string {
  	return s.tags
  }
  
@@ -85,7 +93,7 @@ index 77125cd..0ba4c17 100644
  func (s *URLTest) SelectPreMatchOutbound(metadata *adapter.InboundContext, selectOutbound func(adapter.Outbound) (adapter.Outbound, adapter.PreMatchAction)) (adapter.Outbound, adapter.PreMatchAction) {
  	s.group.Touch()
  	network := metadata.Network
-@@ -307,6 +318,7 @@ func (s *URLTest) onProviderUpdated(tag string) error {
+@@ -307,6 +319,7 @@ func (s *URLTest) onProviderUpdated(tag string) error {
  		outbounds = append(outbounds, detour)
  	}
  	s.tags, s.group.outbounds = tags, outbounds
@@ -93,7 +101,7 @@ index 77125cd..0ba4c17 100644
  	if s.isGroupActive() {
  		s.group.access.Lock()
  		if s.group.ticker != nil {
-@@ -338,6 +350,7 @@ type URLTestGroup struct {
+@@ -338,6 +351,7 @@ type URLTestGroup struct {
  	checking                     atomic.Bool
  	selectedOutboundTCP          adapter.Outbound
  	selectedOutboundUDP          adapter.Outbound
@@ -101,7 +109,7 @@ index 77125cd..0ba4c17 100644
  	interruptGroup               *interrupt.Group
  	interruptExternalConnections bool
  	access                       sync.Mutex
-@@ -366,7 +379,7 @@ func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManage
+@@ -366,7 +380,7 @@ func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManage
  	if history == nil {
  		return nil, E.New("missing URL test history storage")
  	}
@@ -110,13 +118,12 @@ index 77125cd..0ba4c17 100644
  		ctx:                          ctx,
  		outbound:                     outboundManager,
  		logger:                       logger,
-@@ -381,7 +394,9 @@ func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManage
+@@ -381,7 +395,8 @@ func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManage
  		pause:                        service.FromContext[pause.Manager](ctx),
  		interruptGroup:               interrupt.NewGroup(),
  		interruptExternalConnections: interruptExternalConnections,
 -	}, nil
 +	}
-+	group.LoadManualSelected(logger.Tag())
 +	return group, nil
  }
  
