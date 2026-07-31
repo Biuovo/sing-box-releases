@@ -50,6 +50,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
           input_version="$INPUT_VERSION"
           input_commit="$INPUT_COMMIT"
           if [[ -n "$input_version" && ! "$input_version" =~ ^[0-9A-Za-z][0-9A-Za-z.+-]*$ ]]; then
@@ -1069,6 +1070,7 @@ jobs:
           path: build-manifest.json
 
       - name: 发布到 Release 页面
+        working-directory: ${{ github.workspace }}
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.resolve_source.outputs.version }}
