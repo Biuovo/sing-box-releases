@@ -79,10 +79,13 @@ jobs:
                 exit 1
               fi
               input_version="${release_tag#v}"
-              input_version="${input_version%-reF1nd}"
             fi
-            version="$input_version"
-            source_ref="v${version}"
+            upstream_version="$input_version"
+            if [[ "$upstream_version" != *-reF1nd ]]; then
+              upstream_version="${upstream_version}-reF1nd"
+            fi
+            source_ref="v${upstream_version}"
+            version="${upstream_version%-reF1nd}"
             source_sha=$(git ls-remote https://github.com/reF1nd/sing-box.git "$source_ref" | awk '{print $1}' | head -n1)
           fi
           if [[ -z "$source_sha" ]]; then
@@ -957,7 +960,7 @@ jobs:
     if: ${{ always() && needs.resolve_source.result == 'success' && ((inputs.build_type == '核心' && needs.build_cli.result == 'success') || (inputs.build_type == 'GUI' && needs.build_android_library.result == 'success' && needs.build_android.result == 'success' && needs.build_windows_gui.result == 'success' && needs.build_linux_gui.result == 'success')) }}
     permissions:
       actions: read
-      contents: read
+      contents: write
       id-token: write
       attestations: write
       artifact-metadata: write
@@ -1064,3 +1067,36 @@ jobs:
         with:
           name: build-manifest
           path: build-manifest.json
+
+      - name: 发布到 Release 页面
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.resolve_source.outputs.version }}
+          BUILD_TYPE: ${{ inputs.build_type }}
+          RELEASE_CHANNEL: ${{ inputs.release_channel }}
+          SOURCE_REF: ${{ needs.resolve_source.outputs.source_ref }}
+          SOURCE_SHA: ${{ needs.resolve_source.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          case "$RELEASE_CHANNEL" in
+            "测试版") prerelease_flag="--prerelease" ;;
+            "正式版") prerelease_flag="" ;;
+            *) echo "unsupported release channel: $RELEASE_CHANNEL" >&2; exit 1 ;;
+          esac
+          case "$BUILD_TYPE" in
+            "核心") type_suffix="core" ;;
+            "GUI") type_suffix="gui" ;;
+            *) echo "unsupported build type: $BUILD_TYPE" >&2; exit 1 ;;
+          esac
+          tag="v${VERSION}-reF1nd-urltest-${type_suffix}"
+          title="sing-box ${VERSION} reF1nd urltest selectable ${BUILD_TYPE}"
+          notes="基于 reF1nd 源码 ${SOURCE_REF} (${SOURCE_SHA}) 构建。仅额外加入 urltest 可通过 Clash API / GUI 手动选择节点；保留 reF1nd providers 支持。"
+          files=(build-manifest.json)
+          while IFS= read -r -d '' file; do
+            files+=("$file")
+          done < <(find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.apk' -o -name '*.exe' -o -name '*.dmg' \) -print0)
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "${files[@]}" --clobber
+          else
+            gh release create "$tag" "${files[@]}" --title "$title" --notes "$notes" $prerelease_flag
+          fi
