@@ -31,18 +31,10 @@ index 846625a..1301338 100644
  	return &emptypb.Empty{}, nil
  }
 diff --git a/experimental/clashapi/proxies.go b/experimental/clashapi/proxies.go
-index ef88ff3..2210481 100644
+index ef88ff3..9d46df4 100644
 --- a/experimental/clashapi/proxies.go
 +++ b/experimental/clashapi/proxies.go
-@@ -11,7 +11,6 @@ import (
- 	"github.com/sagernet/sing-box/adapter"
- 	"github.com/sagernet/sing-box/common/urltest"
- 	C "github.com/sagernet/sing-box/constant"
--	"github.com/sagernet/sing-box/protocol/group"
- 	"github.com/sagernet/sing/common"
- 	F "github.com/sagernet/sing/common/format"
- 	"github.com/sagernet/sing/common/json/badjson"
-@@ -168,16 +167,16 @@ func updateProxy(w http.ResponseWriter, r *http.Request) {
+@@ -168,16 +168,16 @@ func updateProxy(w http.ResponseWriter, r *http.Request) {
  	}
  
  	proxy := r.Context().Value(CtxKeyProxy).(adapter.Outbound)
