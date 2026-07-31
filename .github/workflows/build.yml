@@ -1,39 +1,35 @@
-name: Build sing-box latest musl
+name: 编译 sing-box：核心 / GUI
 
 on:
   workflow_dispatch:
     inputs:
+      build_type:
+        description: '编译类型'
+        required: true
+        type: choice
+        default: '核心'
+        options:
+          - '核心'
+          - 'GUI'
+      release_channel:
+        description: '发布通道：测试版=最新预发布；正式版=最新稳定版'
+        required: true
+        type: choice
+        default: '测试版'
+        options:
+          - '测试版'
+          - '正式版'
       version:
-        description: 'Version tag without v; leave empty to build latest upstream release/tag (e.g. 1.14.0-beta.3)'
+        description: '可选：指定版本号，不带 v；留空按发布通道自动选择最新版本，例如 1.14.0-beta.3'
         required: false
         default: ''
       commit_hash:
-        description: 'Optional commit hash to build from (overrides version tag)'
+        description: '可选：指定源码 commit，填写后会优先使用它'
         required: false
         default: ''
-      build_cli:
-        description: 'Build CLI'
-        required: false
-        type: boolean
-        default: true
-      build_android_gui:
-        description: 'Build Android'
-        required: false
-        type: boolean
-        default: false
-      build_windows_gui:
-        description: 'Build Windows GUI'
-        required: false
-        type: boolean
-        default: false
-      build_linux_gui:
-        description: 'Build Linux GUI'
-        required: false
-        type: boolean
-        default: false
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.version || 'latest' }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.build_type }}-${{ inputs.release_channel }}-${{ inputs.version || 'latest' }}
   cancel-in-progress: true
 
 env:
@@ -42,14 +38,14 @@ env:
 
 jobs:
   resolve_source:
-    name: Resolve sing-box source
+    name: 解析 reF1nd 最新源码版本
     runs-on: ubuntu-latest
     outputs:
       source_ref: ${{ steps.source.outputs.source_ref }}
       source_sha: ${{ steps.source.outputs.source_sha }}
       version: ${{ steps.source.outputs.version }}
     steps:
-      - name: Resolve latest upstream source
+      - name: 查找 reF1nd 最新发布版本
         id: source
         shell: bash
         run: |
@@ -66,12 +62,20 @@ jobs:
             version="${input_version:-custom-${input_commit:0:12}}"
           else
             if [[ -z "$input_version" ]]; then
-              release_tag=$(gh api repos/reF1nd/sing-box-releases/releases --jq '.[0].tag_name' 2>/dev/null || true)
+              case "$RELEASE_CHANNEL" in
+                "测试版")
+                  release_tag=$(gh api repos/reF1nd/sing-box-releases/releases --jq '[.[] | select(.prerelease == true)][0].tag_name' 2>/dev/null || true)
+                  ;;
+                "正式版")
+                  release_tag=$(gh api repos/reF1nd/sing-box-releases/releases --jq '[.[] | select(.prerelease == false)][0].tag_name' 2>/dev/null || true)
+                  ;;
+                *)
+                  echo "unsupported release channel: $RELEASE_CHANNEL" >&2
+                  exit 1
+                  ;;
+              esac
               if [[ -z "$release_tag" || "$release_tag" == "null" ]]; then
-                release_tag=$(gh release list --repo reF1nd/sing-box-releases --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null || true)
-              fi
-              if [[ -z "$release_tag" || "$release_tag" == "null" ]]; then
-                echo "unable to resolve latest upstream release" >&2
+                echo "unable to resolve latest upstream release for channel: $RELEASE_CHANNEL" >&2
                 exit 1
               fi
               input_version="${release_tag#v}"
@@ -93,10 +97,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           INPUT_VERSION: ${{ inputs.version }}
           INPUT_COMMIT: ${{ inputs.commit_hash }}
+          RELEASE_CHANNEL: ${{ inputs.release_channel }}
 
   build_cli:
-    if: ${{ github.event.inputs.build_cli == 'true' }}
-    name: Build CLI ${{ matrix.platform }}-${{ matrix.arch }} ${{ matrix.variant || matrix.legacy_name }}
+    if: ${{ inputs.build_type == '核心' }}
+    name: 编译 ${{ matrix.platform }}-${{ matrix.arch }} ${{ matrix.variant || matrix.legacy_name }} 命令行版
     runs-on: ${{ matrix.os }}
     needs: resolve_source
     strategy:
@@ -138,24 +143,24 @@ jobs:
             cgo: '1'
             naive: true
     steps:
-      - name: Checkout build config
+      - name: 拉取本仓库编译配置
         uses: actions/checkout@v6
 
-      - name: Setup Go for Darwin
+      - name: 设置 Darwin 用 Go 环境
         if: matrix.platform == 'darwin' && matrix.legacy_macos != true
         uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION_DARWIN }}
           cache: false
 
-      - name: Setup Go
+      - name: 设置 Go 环境
         if: matrix.platform != 'darwin'
         uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: false
 
-      - name: Checkout sing-box
+      - name: 拉取 sing-box 源码
         uses: actions/checkout@v6
         with:
           repository: reF1nd/sing-box
@@ -163,7 +168,7 @@ jobs:
           path: sing-box
           fetch-depth: 1
 
-      - name: Apply local patches and set build tag
+      - name: 应用 urltest 手选补丁并设置构建标签
         shell: bash
         run: |
           set -xeuo pipefail
@@ -180,7 +185,7 @@ jobs:
           path: ~/go/go_osx
           key: go-osx-macos1013-${{ hashFiles('sing-box/.github/setup_go_for_macos1013.sh') }}
 
-      - name: Setup Go for macOS 10.13
+      - name: 设置 Go 环境 for macOS 10.13
         if: matrix.legacy_macos == true && steps.cache-go-for-macos1013.outputs.cache-hit != 'true'
         run: sing-box/.github/setup_go_for_macos1013.sh
         env:
@@ -216,7 +221,7 @@ jobs:
           key: go-mod-windows-${{ hashFiles('sing-box/go.sum') }}
           restore-keys: go-mod-windows-
 
-      - name: Setup Android NDK
+      - name: 设置 Android NDK
         if: matrix.platform == 'android'
         id: setup-ndk
         uses: nttld/setup-ndk@v1
@@ -314,7 +319,7 @@ jobs:
           echo "Tags: ${TAGS}"
           echo "Archive suffix: ${ARCHIVE_SUFFIX}"
 
-      - name: Build
+      - name: 开始编译
         shell: bash
         run: |
           set -xeuo pipefail
@@ -414,8 +419,8 @@ jobs:
           path: sing-box/dist/*
 
   build_android_library:
-    if: ${{ github.event.inputs.build_android_gui == 'true' }}
-    name: Build Android library (${{ matrix.go_arch }})
+    if: ${{ inputs.build_type == 'GUI' }}
+    name: 编译 Android 库 ${{ matrix.go_arch }}
     runs-on: ubuntu-latest
     needs: resolve_source
     strategy:
@@ -423,7 +428,7 @@ jobs:
       matrix:
         go_arch: ['386', amd64, arm, arm64]
     steps:
-      - name: Checkout sing-box
+      - name: 拉取 sing-box 源码
         uses: actions/checkout@v6
         with:
           repository: reF1nd/sing-box
@@ -434,7 +439,7 @@ jobs:
       - name: Set build tag
         run: git -C sing-box tag -f "v${{ needs.resolve_source.outputs.version }}" "${{ needs.resolve_source.outputs.source_sha }}"
 
-      - name: Setup Go
+      - name: 设置 Go 环境
         uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -447,7 +452,7 @@ jobs:
           key: go-mod-linux-${{ hashFiles('sing-box/go.sum') }}
           restore-keys: go-mod-linux-
 
-      - name: Setup Android NDK
+      - name: 设置 Android NDK
         id: setup-ndk
         uses: nttld/setup-ndk@v1
         with:
@@ -459,7 +464,7 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Build library
+      - name: 开始编译 library
         run: |
           set -euo pipefail
           cd sing-box
@@ -479,8 +484,8 @@ jobs:
           compression-level: 0
 
   build_android:
-    if: ${{ github.event.inputs.build_android_gui == 'true' }}
-    name: Build Android (${{ matrix.variant }})
+    if: ${{ inputs.build_type == 'GUI' }}
+    name: 编译 Android APK ${{ matrix.variant }}
     runs-on: ubuntu-latest
     needs: [resolve_source, build_android_library]
     strategy:
@@ -494,7 +499,7 @@ jobs:
             task: :app:assembleOtherLegacyRelease
             output: app/build/outputs/apk/otherLegacy/release/*.apk
     steps:
-      - name: Checkout sing-box
+      - name: 拉取 sing-box 源码
         uses: actions/checkout@v6
         with:
           repository: reF1nd/sing-box
@@ -505,17 +510,17 @@ jobs:
       - name: Set build tag
         run: git -C sing-box tag -f "v${{ needs.resolve_source.outputs.version }}" "${{ needs.resolve_source.outputs.source_sha }}"
 
-      - name: Checkout sing-box-for-android
+      - name: 拉取 sing-box 源码-for-android
         uses: actions/checkout@v6
         with:
           repository: reF1nd/sing-box-for-android
           ref: reF1nd-testing
           path: sing-box-for-android
 
-      - name: Checkout submodule recursive
+      - name: 拉取子模块
         run: git -C sing-box-for-android submodule update --init --recursive -v
 
-      - name: Setup Go
+      - name: 设置 Go 环境
         uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -535,7 +540,7 @@ jobs:
           key: go-build-tools-linux-${{ hashFiles('sing-box/go.sum') }}
           restore-keys: go-build-tools-linux-
 
-      - name: Setup Android NDK
+      - name: 设置 Android NDK
         id: setup-ndk
         uses: nttld/setup-ndk@v1
         with:
@@ -587,7 +592,7 @@ jobs:
       - name: Decode Keystore
         run: echo "${{ secrets.RELEASE_KEYSTORE_FILE }}" | base64 -d > sing-box-for-android/app/release.keystore
 
-      - name: Build APK
+      - name: 开始编译 APK
         run: |
           cd sing-box-for-android
           chmod +x gradlew
@@ -617,8 +622,8 @@ jobs:
           path: dist
 
   build_windows_gui:
-    if: ${{ github.event.inputs.build_windows_gui == 'true' }}
-    name: Build Windows GUI (${{ matrix.desktop_arch }})
+    if: ${{ inputs.build_type == 'GUI' }}
+    name: 编译 Windows 图形界面 ${{ matrix.desktop_arch }}
     runs-on: windows-latest
     needs: resolve_source
     strategy:
@@ -632,7 +637,7 @@ jobs:
           - desktop_arch: arm64
             rust_target: aarch64-pc-windows-msvc
     steps:
-      - name: Checkout sing-box
+      - name: 拉取 sing-box 源码
         uses: actions/checkout@v6
         with:
           repository: reF1nd/sing-box
@@ -640,7 +645,7 @@ jobs:
           path: sing-box
           fetch-depth: 1
 
-      - name: Checkout sing-box-for-desktop
+      - name: 拉取 sing-box 源码-for-desktop
         uses: actions/checkout@v6
         with:
           repository: reF1nd/sing-box-for-desktop
@@ -654,7 +659,7 @@ jobs:
           $tag = "v${{ needs.resolve_source.outputs.version }}"
           git -C sing-box tag -f $tag "${{ needs.resolve_source.outputs.source_sha }}"
 
-      - name: Setup Go
+      - name: 设置 Go 环境
         uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -731,7 +736,7 @@ jobs:
       - name: Install dependencies
         run: pnpm -C sing-box-for-desktop install
 
-      - name: Build
+      - name: 开始编译
         run: pnpm -C sing-box-for-desktop package:win -- ${{ matrix.desktop_arch }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -753,8 +758,8 @@ jobs:
           path: dist
 
   build_linux_gui:
-    if: ${{ github.event.inputs.build_linux_gui == 'true' }}
-    name: Build Linux GUI ${{ matrix.desktop_arch }}
+    if: ${{ inputs.build_type == 'GUI' }}
+    name: 编译 Linux 图形界面 ${{ matrix.desktop_arch }}
     runs-on: ubuntu-26.04
     needs: resolve_source
     strategy:
@@ -771,13 +776,13 @@ jobs:
             go_arch: arm
             go_arm: '7'
     steps:
-      - name: Setup Go
+      - name: 设置 Go 环境
         uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: false
 
-      - name: Checkout sing-box
+      - name: 拉取 sing-box 源码
         uses: actions/checkout@v6
         with:
           repository: reF1nd/sing-box
@@ -785,7 +790,7 @@ jobs:
           path: sing-box
           fetch-depth: 1
 
-      - name: Checkout sing-box-for-desktop
+      - name: 拉取 sing-box 源码-for-desktop
         uses: actions/checkout@v6
         with:
           repository: reF1nd/sing-box-for-desktop
@@ -869,7 +874,7 @@ jobs:
       - name: Install dependencies
         run: pnpm -C sing-box-for-desktop install
 
-      - name: Build
+      - name: 开始编译
         run: pnpm -C sing-box-for-desktop package:linux -- deb rpm pacman ${{ matrix.desktop_arch }}
         env:
           CGO_ENABLED: '0'
@@ -946,10 +951,10 @@ jobs:
           path: dist
 
   finalize_build:
-    name: Finalize build artifacts
+    name: 汇总编译产物
     runs-on: ubuntu-latest
     needs: [resolve_source, build_cli, build_android_library, build_android, build_windows_gui, build_linux_gui]
-    if: ${{ always() && needs.resolve_source.result == 'success' && (inputs.build_cli || inputs.build_android_gui || inputs.build_windows_gui || inputs.build_linux_gui) && (!inputs.build_cli || needs.build_cli.result == 'success') && (!inputs.build_android_gui || (needs.build_android_library.result == 'success' && needs.build_android.result == 'success')) && (!inputs.build_windows_gui || needs.build_windows_gui.result == 'success') && (!inputs.build_linux_gui || needs.build_linux_gui.result == 'success') }}
+    if: ${{ always() && needs.resolve_source.result == 'success' && ((inputs.build_type == '核心' && needs.build_cli.result == 'success') || (inputs.build_type == 'GUI' && needs.build_android_library.result == 'success' && needs.build_android.result == 'success' && needs.build_windows_gui.result == 'success' && needs.build_linux_gui.result == 'success')) }}
     permissions:
       actions: read
       contents: read
@@ -958,7 +963,7 @@ jobs:
       artifact-metadata: write
     steps:
       - name: Download CLI artifacts
-        if: inputs.build_cli
+        if: inputs.build_type == '核心'
         uses: actions/download-artifact@v8
         with:
           pattern: binary-*
@@ -966,7 +971,7 @@ jobs:
           merge-multiple: true
 
       - name: Download Android artifacts
-        if: inputs.build_android_gui
+        if: inputs.build_type == 'GUI'
         uses: actions/download-artifact@v8
         with:
           pattern: android-apk-*
@@ -974,7 +979,7 @@ jobs:
           merge-multiple: true
 
       - name: Download Windows GUI artifacts
-        if: inputs.build_windows_gui
+        if: inputs.build_type == 'GUI'
         uses: actions/download-artifact@v8
         with:
           pattern: windows-gui-*
@@ -982,7 +987,7 @@ jobs:
           merge-multiple: true
 
       - name: Download Linux GUI artifacts
-        if: inputs.build_linux_gui
+        if: inputs.build_type == 'GUI'
         uses: actions/download-artifact@v8
         with:
           pattern: linux-gui-*
@@ -1006,19 +1011,21 @@ jobs:
           } | jq -s 'sort_by(.path)' > artifact-files.json
 
           jq -n \
-            --arg workflow '.github/workflows/build-testing.yml' \
+            --arg workflow '.github/workflows/build.yml' \
             --arg repository "${{ github.repository }}" \
             --arg head_branch "${{ github.ref_name }}" \
             --arg head_sha "${{ github.sha }}" \
             --arg version "${{ needs.resolve_source.outputs.version }}" \
+            --arg build_type "${{ inputs.build_type }}" \
+            --arg release_channel "${{ inputs.release_channel }}" \
             --arg source_sha "${{ needs.resolve_source.outputs.source_sha }}" \
             --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --argjson run_id "${{ github.run_id }}" \
             --argjson run_attempt "${{ github.run_attempt }}" \
-            --argjson build_cli "${{ inputs.build_cli }}" \
-            --argjson build_android_gui "${{ inputs.build_android_gui }}" \
-            --argjson build_windows_gui "${{ inputs.build_windows_gui }}" \
-            --argjson build_linux_gui "${{ inputs.build_linux_gui }}" \
+            --argjson build_cli "${{ inputs.build_type == '核心' }}" \
+            --argjson build_android_gui "${{ inputs.build_type == 'GUI' }}" \
+            --argjson build_windows_gui "${{ inputs.build_type == 'GUI' }}" \
+            --argjson build_linux_gui "${{ inputs.build_type == 'GUI' }}" \
             --slurpfile artifact_files artifact-files.json \
             '{
               schema_version: 1,
@@ -1029,6 +1036,8 @@ jobs:
               run_id: $run_id,
               run_attempt: $run_attempt,
               version: $version,
+              build_type: $build_type,
+              release_channel: $release_channel,
               source_sha: $source_sha,
               built_at: $built_at,
               build: {
@@ -1050,7 +1059,7 @@ jobs:
             artifacts/**
             build-manifest.json
 
-      - name: Upload build manifest
+      - name: 上传构建清单
         uses: actions/upload-artifact@v7
         with:
           name: build-manifest
