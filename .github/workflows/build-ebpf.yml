@@ -178,7 +178,7 @@ jobs:
             gh release upload "$tag" --repo "$GH_REPO" artifacts/*.tar.gz --clobber
             gh release edit "$tag" --repo "$GH_REPO" --title "$title" --notes "$notes" --prerelease
           else
-            gh release create "$tag" --repo "$GH_REPO" artifacts/**/*.tar.gz \
+            gh release create "$tag" --repo "$GH_REPO" artifacts/*.tar.gz \
               --title "$title" --notes "$notes" --prerelease
           fi
           gh release view "$tag" --repo "$GH_REPO"
