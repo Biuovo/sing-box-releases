@@ -1,0 +1,182 @@
+name: 编译 eBPF 核心
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'reF1nd 源码分支或 commit'
+        required: true
+        default: 'reF1nd-testing'
+        type: string
+      version:
+        description: '二进制版本标识'
+        required: true
+        default: 'ebpf-testing'
+        type: string
+
+concurrency:
+  group: build-ebpf-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: '~1.25.12'
+
+jobs:
+  build:
+    name: 编译 eBPF linux-${{ matrix.arch }} musl
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            goarch: amd64
+            goamd64: v1
+            naive_target: amd64
+          - arch: amd64v3
+            goarch: amd64
+            goamd64: v3
+            naive_target: amd64
+          - arch: arm64
+            goarch: arm64
+            goamd64: ''
+            naive_target: arm64
+
+    steps:
+      - name: 拉取本仓库配置
+        uses: actions/checkout@v6
+
+      - name: 设置 Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: 安装 eBPF 编译工具
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y clang llvm make linux-libc-dev
+
+      - name: 拉取 reF1nd 源码
+        uses: actions/checkout@v6
+        with:
+          repository: reF1nd/sing-box
+          ref: ${{ inputs.source_ref }}
+          path: sing-box
+          fetch-depth: 1
+
+      - name: 应用 urltest 手选补丁
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd sing-box
+          git apply "$GITHUB_WORKSPACE/.github/patches/urltest-selectable.patch"
+          git rev-parse HEAD
+
+      - name: 生成 eBPF 对象
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd sing-box
+          BPF_CLANG=clang make -C common/ebpf generate
+          file common/ebpf/native/shared_network.bpf.o
+
+      - name: Clone cronet-go
+        shell: bash
+        run: |
+          set -euxo pipefail
+          CRONET_GO_VERSION=$(cat sing-box/.github/CRONET_GO_VERSION)
+          git init "$HOME/cronet-go"
+          git -C "$HOME/cronet-go" remote add origin https://github.com/sagernet/cronet-go.git
+          git -C "$HOME/cronet-go" fetch --depth=1 origin "$CRONET_GO_VERSION"
+          git -C "$HOME/cronet-go" checkout FETCH_HEAD
+          git -C "$HOME/cronet-go" submodule update --init --recursive --depth=1
+
+      - name: Regenerate Debian keyring
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -f "$HOME/cronet-go/naiveproxy/src/build/linux/sysroot_scripts/keyring.gpg"
+          cd "$HOME/cronet-go"
+          GPG_TTY=/dev/null ./naiveproxy/src/build/linux/sysroot_scripts/generate_keyring.sh
+
+      - name: 准备 musl 工具链
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "$HOME/cronet-go"
+          go run ./cmd/build-naive --target=linux/${{ matrix.naive_target }} --libc=musl download-toolchain
+          go run ./cmd/build-naive --target=linux/${{ matrix.naive_target }} --libc=musl env >> "$GITHUB_ENV"
+
+      - name: 编译 eBPF 核心
+        shell: bash
+        env:
+          CGO_ENABLED: '1'
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          GOAMD64: ${{ matrix.goamd64 }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -xeuo pipefail
+          cd sing-box
+          TAGS=$(cat release/DEFAULT_BUILD_TAGS)
+          [[ "$TAGS" == *with_naive_outbound* ]] || TAGS="$TAGS,with_naive_outbound"
+          TAGS="$TAGS,with_musl,with_ebpf"
+          echo "build tags: $TAGS"
+          mkdir -p dist
+          go build -v -trimpath \
+            -tags "$TAGS" \
+            -ldflags "-X github.com/sagernet/sing-box/constant.Version=$VERSION -s -w -buildid=" \
+            -o dist/sing-box ./cmd/sing-box
+          mkdir -p "dist/sing-box-${VERSION}-linux-${{ matrix.arch }}-musl"
+          cp LICENSE dist/sing-box-${VERSION}-linux-${{ matrix.arch }}-musl/
+          cp dist/sing-box dist/sing-box-${VERSION}-linux-${{ matrix.arch }}-musl/
+          tar -czf "dist/sing-box-${VERSION}-linux-${{ matrix.arch }}-musl.tar.gz" \
+            -C dist "sing-box-${VERSION}-linux-${{ matrix.arch }}-musl"
+          rm -rf "dist/sing-box-${VERSION}-linux-${{ matrix.arch }}-musl" dist/sing-box
+
+      - name: 上传 eBPF 核心包
+        uses: actions/upload-artifact@v7
+        with:
+          name: ebpf-linux-${{ matrix.arch }}-musl
+          path: sing-box/dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: 发布 eBPF Release
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: 拉取本仓库配置
+        uses: actions/checkout@v6
+
+      - name: 下载全部 eBPF 核心包
+        uses: actions/download-artifact@v8
+        with:
+          pattern: ebpf-linux-*-musl
+          path: artifacts
+          merge-multiple: true
+
+      - name: 发布到独立 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ inputs.version }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag='ebpf-latest-reF1nd-urltest-core'
+          title="sing-box ${VERSION} reF1nd urltest selectable eBPF core"
+          notes="基于 reF1nd ${SOURCE_REF} 构建；包含 with_ebpf，并保留 providers 与 urltest 手动选择支持。"
+          find artifacts -type f -name '*.tar.gz' -print
+          if gh release view "$tag" --repo "$GH_REPO" >/dev/null 2>&1; then
+            gh release upload "$tag" --repo "$GH_REPO" artifacts/**/*.tar.gz --clobber
+            gh release edit "$tag" --repo "$GH_REPO" --title "$title" --notes "$notes" --prerelease
+          else
+            gh release create "$tag" --repo "$GH_REPO" artifacts/**/*.tar.gz \
+              --title "$title" --notes "$notes" --prerelease
+          fi
+          gh release view "$tag" --repo "$GH_REPO"
