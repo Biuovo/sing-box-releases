@@ -124,11 +124,13 @@ jobs:
           TAGS=$(cat release/DEFAULT_BUILD_TAGS)
           [[ "$TAGS" == *with_naive_outbound* ]] || TAGS="$TAGS,with_naive_outbound"
           TAGS="$TAGS,with_musl,with_ebpf"
+          LDFLAGS_SHARED=$(cat release/LDFLAGS)
           echo "build tags: $TAGS"
+          echo "ldflags: $LDFLAGS_SHARED"
           mkdir -p dist
           go build -v -trimpath \
             -tags "$TAGS" \
-            -ldflags "-X github.com/sagernet/sing-box/constant.Version=$VERSION -s -w -buildid=" \
+            -ldflags "-X github.com/sagernet/sing-box/constant.Version=$VERSION $LDFLAGS_SHARED -s -w -buildid=" \
             -o dist/sing-box ./cmd/sing-box
           mkdir -p "dist/sing-box-${VERSION}-linux-${{ matrix.arch }}-musl"
           cp LICENSE dist/sing-box-${VERSION}-linux-${{ matrix.arch }}-musl/
